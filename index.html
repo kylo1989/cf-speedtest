@@ -1,0 +1,641 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Cloudflare 优选 IP 本地测速与精准归档工作台</title>
+  <style>
+    :root {
+      --primary: #2563eb;
+      --primary-hover: #1d4ed8;
+      --bg: #f8fafc;
+      --card-bg: #ffffff;
+      --border: #e2e8f0;
+      --text: #0f172a;
+      --text-muted: #64748b;
+      --success: #16a34a;
+    }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      max-width: 1040px;
+      margin: 20px auto;
+      padding: 0 16px;
+      background: var(--bg);
+      color: var(--text);
+      line-height: 1.5;
+    }
+    .card {
+      background: var(--card-bg);
+      padding: 20px 24px;
+      border-radius: 8px;
+      border: 1px solid var(--border);
+      box-shadow: 0 1px 3px rgba(0,0,0,0.05);
+      margin-bottom: 16px;
+    }
+    h2 {
+      margin: 0 0 12px 0;
+      font-size: 1.1rem;
+      border-bottom: 2px solid var(--primary);
+      padding-bottom: 6px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+    .grid-3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 14px; }
+    label { display: block; font-size: 0.85rem; font-weight: 600; margin-bottom: 4px; color: #475569; }
+    input, select, textarea, button {
+      width: 100%;
+      padding: 9px 11px;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      box-sizing: border-box;
+      font-size: 0.9rem;
+    }
+    input:focus, select:focus, textarea:focus {
+      outline: none;
+      border-color: var(--primary);
+      box-shadow: 0 0 0 2px rgba(37,99,235,0.15);
+    }
+    button {
+      background: var(--primary);
+      color: #fff;
+      border: none;
+      font-weight: 600;
+      cursor: pointer;
+      transition: background 0.2s;
+    }
+    button:hover { background: var(--primary-hover); }
+    button:disabled { background: #cbd5e1; cursor: not-allowed; }
+    .btn-secondary { background: #64748b; }
+    .btn-secondary:hover { background: #475569; }
+    .btn-success { background: var(--success); }
+    .btn-success:hover { background: #15803d; }
+    .flex-actions { display: flex; gap: 10px; margin-top: 14px; }
+    #log {
+      background: #0f172a;
+      color: #38bdf8;
+      padding: 12px;
+      border-radius: 6px;
+      font-family: Consolas, Monaco, monospace;
+      font-size: 0.82rem;
+      height: 150px;
+      overflow-y: auto;
+      white-space: pre-wrap;
+    }
+    table { width: 100%; border-collapse: collapse; margin-top: 14px; font-size: 0.88rem; }
+    th, td { border: 1px solid var(--border); padding: 8px 12px; text-align: left; }
+    th { background: #f1f5f9; font-weight: 600; }
+    .badge {
+      display: inline-block;
+      padding: 2px 7px;
+      border-radius: 4px;
+      font-size: 0.75rem;
+      font-weight: 600;
+    }
+    .badge-pass { background: #dcfce7; color: #166534; }
+    .badge-fail { background: #fee2e2; color: #991b1b; }
+    .token-status { font-size: 0.8rem; margin-top: 5px; font-weight: 600; }
+    .token-valid { color: #16a34a; }
+    .token-invalid { color: #dc2626; }
+    /* 密码锁 */
+    #lockModal {
+      position: fixed;
+      top: 0; left: 0; width: 100%; height: 100%;
+      background: rgba(15, 23, 42, 0.9);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      z-index: 9999;
+    }
+    .lock-box {
+      background: #fff;
+      padding: 28px;
+      border-radius: 8px;
+      width: 320px;
+      text-align: center;
+      box-shadow: 0 10px 25px rgba(0,0,0,0.25);
+    }
+  </style>
+</head>
+<body>
+
+  <!-- 后端联动密码锁 -->
+  <div id="lockModal">
+    <div class="lock-box">
+      <h3 style="margin-top:0; color:#0f172a;">🔐 访问受限</h3>
+      <p style="font-size: 0.85rem; color: #64748b; margin-bottom: 14px;">页面已与 CF 环境变量联动，请输入密码</p>
+      <input type="password" id="authPassword" placeholder="输入 ACCESS_PASSWORD" style="margin-bottom: 10px;">
+      <button id="authBtn" onclick="verifyAccess()">验证进入</button>
+      <div id="authErrMsg" style="color:#ef4444; font-size: 0.8rem; margin-top: 8px; display: none;"></div>
+    </div>
+  </div>
+
+  <div id="mainApp" style="display: none;">
+
+    <!-- 1. GitHub Token 权限验证与仓库绑定 -->
+    <div class="card">
+      <h2>1. GitHub 授权与仓库权限探测 <span style="font-size:0.8rem; font-weight:normal; color:var(--text-muted);">自动持久化存储</span></h2>
+      <div class="grid-2">
+        <div>
+          <label>GitHub Personal Access Token (PAT)</label>
+          <input type="password" id="ghToken" placeholder="ghp_xxxx" onchange="handleTokenChange()">
+          <div id="tokenNotice" class="token-status"></div>
+        </div>
+        <div>
+          <label>默认目标分支 (Branch)</label>
+          <input type="text" id="ghBranch" value="main" onchange="saveConfig()">
+        </div>
+      </div>
+    </div>
+
+    <!-- 2. 分运营商指定具体仓库与文件路径 -->
+    <div class="card">
+      <h2>2. 分运营商归档目标 (支持指定不同仓库与文件路径)</h2>
+      <div class="grid-3">
+        <!-- 电信配置 -->
+        <div style="background: #f8fafc; padding: 12px; border-radius: 6px; border: 1px solid var(--border);">
+          <label style="color:#2563eb;">🌐 中国电信 (Telecom)</label>
+          <label style="margin-top:6px;">目标仓库 (user/repo)</label>
+          <input type="text" id="telecomRepo" placeholder="例如: username/cf-telecom" onchange="saveConfig()">
+          <label style="margin-top:6px;">文件相对路径</label>
+          <input type="text" id="telecomPath" value="telecom.txt" onchange="saveConfig()">
+        </div>
+
+        <!-- 联通配置 -->
+        <div style="background: #f8fafc; padding: 12px; border-radius: 6px; border: 1px solid var(--border);">
+          <label style="color:#0284c7;">🌐 中国联通 (Unicom)</label>
+          <label style="margin-top:6px;">目标仓库 (user/repo)</label>
+          <input type="text" id="unicomRepo" placeholder="例如: username/cf-unicom" onchange="saveConfig()">
+          <label style="margin-top:6px;">文件相对路径</label>
+          <input type="text" id="unicomPath" value="unicom.txt" onchange="saveConfig()">
+        </div>
+
+        <!-- 移动配置 -->
+        <div style="background: #f8fafc; padding: 12px; border-radius: 6px; border: 1px solid var(--border);">
+          <label style="color:#059669;">🌐 中国移动 (Mobile)</label>
+          <label style="margin-top:6px;">目标仓库 (user/repo)</label>
+          <input type="text" id="mobileRepo" placeholder="例如: username/cf-mobile" onchange="saveConfig()">
+          <label style="margin-top:6px;">文件相对路径</label>
+          <input type="text" id="mobilePath" value="mobile.txt" onchange="saveConfig()">
+        </div>
+      </div>
+
+      <div class="grid-2" style="margin-top: 14px;">
+        <div>
+          <label>当前本地链路探测结果</label>
+          <input type="text" id="ispStatus" value="正在识别运营商..." readonly style="background:#f1f5f9;">
+        </div>
+        <div>
+          <label>本次测速上传归属 (自动根据链路选中)</label>
+          <select id="activeIspSelect">
+            <option value="telecom">中国电信配置 (写入 电信仓库与文件)</option>
+            <option value="unicom">中国联通配置 (写入 联通仓库与文件)</option>
+            <option value="mobile">中国移动配置 (写入 移动仓库与文件)</option>
+          </select>
+        </div>
+      </div>
+    </div>
+
+    <!-- 3. 优选 IP 来源丰富库与自定义源管理器 -->
+    <div class="card">
+      <h2>3. 优质 IP 来源库与自定义源管理器</h2>
+      
+      <!-- 预设选择器与添加源 -->
+      <div class="grid-2">
+        <div>
+          <label>优质源下拉选择器 (已收录主流热门源)</label>
+          <div style="display:flex; gap:8px;">
+            <select id="presetSources" style="flex:1;">
+              <!-- 动态从内置+自定义列表渲染 -->
+            </select>
+            <button style="width: auto; padding: 0 16px;" onclick="applySelectedPreset()">载入</button>
+          </div>
+        </div>
+        <div>
+          <label>自定义新增永久预设源</label>
+          <div style="display:flex; gap:8px;">
+            <input type="text" id="newSourceName" placeholder="名称 (如: 某某频道源)" style="flex:1;">
+            <input type="text" id="newSourceUrl" placeholder="Raw 链接" style="flex:2;">
+            <button class="btn-success" style="width: auto; padding: 0 16px;" onclick="saveCustomPreset()">添加</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- 候选测速池 -->
+      <div style="margin-top: 14px;">
+        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:5px;">
+          <label style="margin:0;">本次测速候选池 (支持同时输入 URL 链接、纯 IP 或 IP:端口)</label>
+          <span style="font-size:0.8rem; color:var(--text-muted);">保留前 <input type="number" id="topCount" value="10" style="width:50px; display:inline; padding:2px 4px;"> 个最低延迟</span>
+        </div>
+        <textarea id="sources" rows="5" placeholder="示例格式：&#10;https://raw.githubusercontent.com/.../ip.txt&#10;104.16.80.1:443&#10;172.67.140.2&#10;104.19.18.5:2053" onchange="saveConfig()"></textarea>
+      </div>
+
+      <div class="flex-actions">
+        <button id="startBtn" onclick="runPipeline()">🚀 开始测速并自动同步至对应 GitHub 仓库</button>
+        <button class="btn-secondary" onclick="copyCurrentResults()">📋 复制可用 IP</button>
+      </div>
+    </div>
+
+    <!-- 4. 运行控制台与测速详情 -->
+    <div class="card">
+      <h2>4. 运行日志与测速详情</h2>
+      <div id="log">系统初始化中...</div>
+      <table id="resultTable" style="display:none;">
+        <thead>
+          <tr><th>目标 IP</th><th>端口</th><th>延迟 (RTT)</th><th>状态</th></tr>
+        </thead>
+        <tbody id="resultBody"></tbody>
+      </table>
+    </div>
+
+  </div>
+
+  <script>
+    // ----------------------------------------------------
+    // 1. Pages Functions 环境变量鉴权
+    // ----------------------------------------------------
+    async function verifyAccess() {
+      const pwd = document.getElementById('authPassword').value;
+      const btn = document.getElementById('authBtn');
+      const errBox = document.getElementById('authErrMsg');
+      
+      btn.disabled = true;
+      btn.textContent = '验证中...';
+      errBox.style.display = 'none';
+
+      try {
+        const resp = await fetch('/api/auth', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ password: pwd })
+        });
+        const res = await resp.json();
+
+        if (resp.ok && res.ok) {
+          sessionStorage.setItem('cf_auth_pass', 'true');
+          document.getElementById('lockModal').style.display = 'none';
+          document.getElementById('mainApp').style.display = 'block';
+          if (res.warning) log(`[注意] ${res.warning}`);
+          initApp();
+        } else {
+          errBox.textContent = res.message || '密码错误';
+          errBox.style.display = 'block';
+        }
+      } catch (e) {
+        errBox.textContent = '后端接口异常，请确认 functions/api/auth.js 是否正常部署';
+        errBox.style.display = 'block';
+      } finally {
+        btn.disabled = false;
+        btn.textContent = '验证进入';
+      }
+    }
+
+    window.onload = function() {
+      if (sessionStorage.getItem('cf_auth_pass') === 'true') {
+        document.getElementById('lockModal').style.display = 'none';
+        document.getElementById('mainApp').style.display = 'block';
+        initApp();
+      }
+    };
+
+    function initApp() {
+      loadSavedConfig();
+      renderPresetDropdown();
+      initISP();
+    }
+
+    // ----------------------------------------------------
+    // 2. Token 有效性与仓库权限自动验证
+    // ----------------------------------------------------
+    async function handleTokenChange() {
+      saveConfig();
+      const token = document.getElementById('ghToken').value.trim();
+      const notice = document.getElementById('tokenNotice');
+
+      if (!token) {
+        notice.textContent = '';
+        return;
+      }
+
+      notice.textContent = '正在检测 Token 权限...';
+      notice.className = 'token-status';
+
+      try {
+        const res = await fetch('https://api.github.com/user', {
+          headers: {
+            'Authorization': `Bearer ${token}`,
+            'Accept': 'application/vnd.github.v3+json'
+          }
+        });
+
+        if (res.ok) {
+          const user = await res.json();
+          const scopes = res.headers.get('x-oauth-scopes') || '';
+          
+          if (scopes.includes('repo') || scopes === '') {
+            notice.textContent = `✅ 验证成功 (用户: ${user.login}，具备仓库读写权限)`;
+            notice.className = 'token-status token-valid';
+          } else {
+            notice.textContent = `⚠️ 用户 ${user.login} 验证成功，但未检测到完整 'repo' 权限，可能无法写入！`;
+            notice.className = 'token-status token-invalid';
+          }
+        } else {
+          notice.textContent = '❌ Token 无效或已过期';
+          notice.className = 'token-status token-invalid';
+        }
+      } catch (err) {
+        notice.textContent = '网络原因无法验证 Token，请确认连接';
+        notice.className = 'token-status token-invalid';
+      }
+    }
+
+    // ----------------------------------------------------
+    // 3. 预设源与自定义新增源管理
+    // ----------------------------------------------------
+    const DEFAULT_PRESETS = [
+      { name: "LancelotRar 综合每日优选", url: "https://raw.githubusercontent.com/LancelotRar/best-cf-ips/main/best-cf-ip-collected.txt" },
+      { name: "XIU2 官方基础 CIDR 库", url: "https://raw.githubusercontent.com/XIU2/CloudflareSpeedTest/master/ip.txt" },
+      { name: "ymyuuu CF 全球数据中心 IP 库", url: "https://raw.githubusercontent.com/ymyuuu/Cloudflare-Datacenter-IP/main/ips.txt" },
+      { name: "ipdb-cloudflare 每日优选", url: "https://raw.githubusercontent.com/IPDB-CF/ipdb-cloudflare/main/bestproxy.txt" },
+      { name: "badafans 优选反代 IP", url: "https://raw.githubusercontent.com/badafans/better-cloudflare-ip/master/shell/cf.txt" }
+    ];
+
+    function getCombinedPresets() {
+      const custom = JSON.parse(localStorage.getItem('cf_custom_presets') || '[]');
+      return [...DEFAULT_PRESETS, ...custom];
+    }
+
+    function renderPresetDropdown() {
+      const sel = document.getElementById('presetSources');
+      sel.innerHTML = '<option value="">-- 选择后点击载入追加至测速池 --</option>';
+      const all = getCombinedPresets();
+      all.forEach((item, idx) => {
+        const opt = document.createElement('option');
+        opt.value = item.url;
+        opt.textContent = item.name;
+        sel.appendChild(opt);
+      });
+    }
+
+    function applySelectedPreset() {
+      const sel = document.getElementById('presetSources');
+      if (!sel.value) return;
+      const cur = document.getElementById('sources');
+      cur.value = cur.value.trim() ? (cur.value.trim() + '\n' + sel.value) : sel.value;
+      saveConfig();
+      log(`已载入源: ${sel.options[sel.selectedIndex].text}`);
+    }
+
+    function saveCustomPreset() {
+      const name = document.getElementById('newSourceName').value.trim();
+      const url = document.getElementById('newSourceUrl').value.trim();
+      if (!name || !url) return alert('请完整输入源名称和 URL 链接');
+
+      const custom = JSON.parse(localStorage.getItem('cf_custom_presets') || '[]');
+      custom.push({ name, url });
+      localStorage.setItem('cf_custom_presets', JSON.stringify(custom));
+
+      document.getElementById('newSourceName').value = '';
+      document.getElementById('newSourceUrl').value = '';
+      renderPresetDropdown();
+      alert(`已成功添加自定义源：${name}`);
+    }
+
+    // ----------------------------------------------------
+    // 4. 配置持久化与链路探测
+    // ----------------------------------------------------
+    const CONFIG_FIELDS = [
+      'ghToken', 'ghBranch',
+      'telecomRepo', 'telecomPath',
+      'unicomRepo', 'unicomPath',
+      'mobileRepo', 'mobilePath',
+      'sources'
+    ];
+
+    function loadSavedConfig() {
+      CONFIG_FIELDS.forEach(f => {
+        const val = localStorage.getItem('cfg_v2_' + f);
+        if (val && document.getElementById(f)) document.getElementById(f).value = val;
+      });
+      if (document.getElementById('ghToken').value) handleTokenChange();
+    }
+
+    function saveConfig() {
+      CONFIG_FIELDS.forEach(f => {
+        const el = document.getElementById(f);
+        if (el) localStorage.setItem('cfg_v2_' + f, el.value.trim());
+      });
+    }
+
+    const logBox = document.getElementById('log');
+    function log(msg) {
+      logBox.textContent += `[${new Date().toLocaleTimeString()}] ${msg}\n`;
+      logBox.scrollTop = logBox.scrollHeight;
+    }
+
+    async function initISP() {
+      try {
+        const res = await fetch('https://speed.cloudflare.com/meta');
+        const data = await res.json();
+        const org = (data.asOrganization || data.isp || '').toLowerCase();
+        let name = data.asOrganization || '未知网络';
+
+        if (org.includes('telecom')) {
+          name = '中国电信 (China Telecom)';
+          document.getElementById('activeIspSelect').value = 'telecom';
+        } else if (org.includes('unicom')) {
+          name = '中国联通 (China Unicom)';
+          document.getElementById('activeIspSelect').value = 'unicom';
+        } else if (org.includes('mobile')) {
+          name = '中国移动 (China Mobile)';
+          document.getElementById('activeIspSelect').value = 'mobile';
+        }
+
+        document.getElementById('ispStatus').value = name;
+        log(`链路识别完成: ${name}，已匹配至对应运营商仓库方案`);
+      } catch (e) {
+        document.getElementById('ispStatus').value = '无法自动识别，可手动选择运营商';
+      }
+    }
+
+    // ----------------------------------------------------
+    // 5. 测速与精准仓库推送
+    // ----------------------------------------------------
+    let sortedBestResults = [];
+
+    async function runPipeline() {
+      const token = document.getElementById('ghToken').value.trim();
+      const branch = document.getElementById('ghBranch').value.trim();
+      const topCount = parseInt(document.getElementById('topCount').value, 10) || 10;
+      const ispType = document.getElementById('activeIspSelect').value;
+
+      let targetRepo = "";
+      let targetPath = "";
+
+      if (ispType === 'telecom') {
+        targetRepo = document.getElementById('telecomRepo').value.trim();
+        targetPath = document.getElementById('telecomPath').value.trim();
+      } else if (ispType === 'unicom') {
+        targetRepo = document.getElementById('unicomRepo').value.trim();
+        targetPath = document.getElementById('unicomPath').value.trim();
+      } else if (ispType === 'mobile') {
+        targetRepo = document.getElementById('mobileRepo').value.trim();
+        targetPath = document.getElementById('mobilePath').value.trim();
+      }
+
+      if (!targetRepo || !targetPath) {
+        alert(`请先在第 2 步完善【${ispType}】的目标仓库和文件路径！`);
+        return;
+      }
+
+      document.getElementById('startBtn').disabled = true;
+      document.getElementById('resultTable').style.display = 'table';
+      document.getElementById('resultBody').innerHTML = '';
+      sortedBestResults = [];
+
+      try {
+        log('正在解析候选池 (处理 URL 拉取与直填 IP)...');
+        const rawLines = document.getElementById('sources').value.split('\n').map(l => l.trim()).filter(Boolean);
+        let candidatePool = [];
+
+        for (const line of rawLines) {
+          if (line.startsWith('http://') || line.startsWith('https://')) {
+            try {
+              const resp = await fetch(line);
+              const txt = await resp.text();
+              candidatePool = candidatePool.concat(parseIPList(txt));
+            } catch (err) {
+              log(`拉取外部链接失败: ${line}`);
+            }
+          } else {
+            candidatePool = candidatePool.concat(parseIPList(line));
+          }
+        }
+
+        // 去重
+        const unique = new Map();
+        candidatePool.forEach(item => {
+          const k = `${item.ip}:${item.port}`;
+          if (!unique.has(k)) unique.set(k, item);
+        });
+
+        const listToTest = Array.from(unique.values()).slice(0, 100);
+        log(`清洗完毕，共获得 ${listToTest.length} 个独立节点，开始并发测速...`);
+
+        const validNodes = [];
+
+        for (const node of listToTest) {
+          const rtt = await probeLatency(node.ip, node.port, 2000);
+          const tr = document.createElement('tr');
+          const ok = rtt < 9999;
+          tr.innerHTML = `
+            <td><strong>${node.ip}</strong></td>
+            <td>${node.port}</td>
+            <td>${ok ? rtt + ' ms' : '超时'}</td>
+            <td><span class="badge ${ok ? 'badge-pass' : 'badge-fail'}">${ok ? '可用' : '不可达'}</span></td>
+          `;
+          document.getElementById('resultBody').appendChild(tr);
+
+          if (ok) validNodes.push({ ...node, rtt });
+        }
+
+        validNodes.sort((a, b) => a.rtt - b.rtt);
+        sortedBestResults = validNodes.slice(0, topCount);
+        log(`测速完成，共筛选出 ${sortedBestResults.length} 个低延迟节点。`);
+
+        if (sortedBestResults.length === 0) {
+          log('未发现可用 IP，终止上传。');
+          return;
+        }
+
+        // 推送至指定仓库
+        if (token && targetRepo && targetPath) {
+          log(`准备推送至 GitHub 仓库 [${targetRepo}] 路径 [${targetPath}] ...`);
+          const bodyContent = sortedBestResults.map(i => `${i.ip}:${i.port}#${i.rtt}ms`).join('\n');
+          await uploadToGitHub(targetRepo, branch, targetPath, bodyContent, token);
+          log(`🎉 归档成功！已更新至 ${targetRepo}/${targetPath}`);
+        } else {
+          log('Token 或仓库配置缺失，跳过线上同步。可点击下方手动复制。');
+        }
+
+      } catch (e) {
+        log(`执行错误: ${e.message}`);
+      } finally {
+        document.getElementById('startBtn').disabled = false;
+      }
+    }
+
+    function parseIPList(text) {
+      const results = [];
+      const lines = text.split('\n');
+      const reg = /\b((?:\d{1,3}\.){3}\d{1,3})(?::(\d{2,5}))?\b/;
+      for (const l of lines) {
+        const m = l.trim().match(reg);
+        if (m) {
+          results.push({ ip: m[1], port: m[2] ? parseInt(m[2], 10) : 443 });
+        }
+      }
+      return results;
+    }
+
+    function probeLatency(ip, port, timeout) {
+      return new Promise((resolve) => {
+        const start = performance.now();
+        const ctrl = new AbortController();
+        const t = setTimeout(() => { ctrl.abort(); resolve(9999); }, timeout);
+
+        fetch(`https://${ip}:${port}/cdn-cgi/trace`, {
+          mode: 'no-cors',
+          cache: 'no-store',
+          signal: ctrl.signal
+        }).then(() => {
+          clearTimeout(t);
+          resolve(Math.round(performance.now() - start));
+        }).catch(() => {
+          clearTimeout(t);
+          resolve(9999);
+        });
+      });
+    }
+
+    function copyCurrentResults() {
+      if (sortedBestResults.length === 0) return alert('当前没有已测速合格的 IP！');
+      const out = sortedBestResults.map(i => `${i.ip}:${i.port}`).join('\n');
+      navigator.clipboard.writeText(out).then(() => alert(`已成功复制 ${sortedBestResults.length} 个优选 IP 到剪贴板！`));
+    }
+
+    async function uploadToGitHub(fullRepo, branch, path, content, token) {
+      const url = `https://api.github.com/repos/${fullRepo}/contents/${path}`;
+      const headers = {
+        'Authorization': `Bearer ${token}`,
+        'Accept': 'application/vnd.github.v3+json',
+        'Content-Type': 'application/json'
+      };
+
+      let sha = undefined;
+      try {
+        const chk = await fetch(`${url}?ref=${branch}`, { headers });
+        if (chk.ok) sha = (await chk.json()).sha;
+      } catch (_) {}
+
+      const utf8 = new TextEncoder().encode(content);
+      let bin = '';
+      for (let i = 0; i < utf8.byteLength; i++) bin += String.fromCharCode(utf8[i]);
+
+      const payload = {
+        message: `Auto-update ${path} via CF SpeedTester [skip ci]`,
+        content: btoa(bin),
+        branch: branch
+      };
+      if (sha) payload.sha = sha;
+
+      const res = await fetch(url, { method: 'PUT', headers, body: JSON.stringify(payload) });
+      if (!res.ok) {
+        const err = await res.json();
+        throw new Error(err.message || 'GitHub 写入失败');
+      }
+    }
+  </script>
+</body>
+</html>
